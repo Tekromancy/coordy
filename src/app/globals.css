@@ -50,3 +50,28 @@ body {
 .pending-marker-tooltip::before {
   border-top-color: #0284c7 !important;
 }
+
+.custom-endpoint-marker {
+  background: transparent !important;
+  border: none !important;
+}
+
+.custom-endpoint-marker:hover .endpoint-dot {
+  transform: scale(1.3);
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.9) !important;
+}
+
+.custom-endpoint-tooltip {
+  background-color: #0f172a !important;
+  color: #f8fafc !important;
+  border: 1px solid #3b82f6 !important;
+  border-radius: 6px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  box-shadow: 0 4px 10px rgb(0 0 0 / 0.5) !important;
+  padding: 3px 8px !important;
+}
+
+.custom-endpoint-tooltip::before {
+  border-top-color: #3b82f6 !important;
+}
