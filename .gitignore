@@ -19,6 +19,12 @@
 
 # production
 /build
+/dist/
+
+# prevent non-pnpm lockfiles
+package-lock.json
+yarn.lock
+bun.lockb
 
 # misc
 .DS_Store

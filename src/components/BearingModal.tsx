@@ -131,21 +131,32 @@ export default function BearingModal({
     setResolving(true);
 
     try {
-      const keyParam = w3wKey ? `&key=${encodeURIComponent(w3wKey)}` : '';
-      const res = await fetch(`/api/what3words?words=${encodeURIComponent(raw)}${keyParam}`);
-      const data = await res.json();
+      const cleaned = raw
+        .trim()
+        .replace(/^[\/\s]+/, '')
+        .split(/[\s.]+/)
+        .filter(Boolean)
+        .join('.');
 
-      if (!res.ok) {
-        if (data.error === 'API_KEY_REQUIRED') {
-          setShowKeyInput(true);
-          setError('what3words API key needed to convert words to coordinates.');
-        } else {
-          setError(data.error || 'Failed to resolve what3words address');
-        }
+      const apiKey = w3wKey || process.env.NEXT_PUBLIC_WHAT3WORDS_API_KEY;
+
+      if (!apiKey) {
+        setShowKeyInput(true);
+        setError('what3words API key needed to convert words to coordinates.');
         return;
       }
 
-      setCoord(`${data.lat.toFixed(6)}, ${data.lon.toFixed(6)}`);
+      const res = await fetch(
+        `https://api.what3words.com/v2/convert-to-coordinates?words=${encodeURIComponent(cleaned)}&key=${encodeURIComponent(apiKey)}`
+      );
+      const data = await res.json();
+
+      if (!res.ok || data.error) {
+        setError(data.error?.message || data.error || 'Failed to resolve what3words address');
+        return;
+      }
+
+      setCoord(`${data.coordinates.lat.toFixed(6)}, ${data.coordinates.lng.toFixed(6)}`);
     } catch {
       setError('Network error contacting what3words API.');
     } finally {
@@ -241,7 +252,7 @@ export default function BearingModal({
         <div className="px-6 pt-3">
           <div className="flex items-center justify-between bg-slate-950/70 border border-slate-800 px-3 py-2 rounded-xl text-xs">
             <div className="flex items-center gap-2 text-slate-300">
-              <span className="font-semibold text-rose-400 font-mono">///</span>
+              <span className="font-semibold text-rose-400 font-mono">{'///'}</span>
               <span>what3words Integration: Enter 3 words like <code className="text-sky-300">filled.count.soap</code></span>
             </div>
             <button

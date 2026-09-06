@@ -1,7 +1,14 @@
 import type { NextConfig } from "next";
 
+const basePath = process.env.BASE_PATH ?? "";
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  output: "export",
+  distDir: "dist",
+  basePath: basePath ? (basePath.startsWith("/") ? basePath : `/${basePath}`) : undefined,
+  images: {
+    unoptimized: true,
+  },
 };
 
 export default nextConfig;
