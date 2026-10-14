@@ -51,10 +51,10 @@ const PRESETS: Preset[] = [
     note: 'North-Northeast heading ~17.6°',
   },
   {
-    name: 'what3words: London (Trafalgar to Eye)',
-    p1: 'filled.count.soap',
-    p2: 'daring.lion.race',
-    note: 'London Landmark 3 words',
+    name: 'London: Trafalgar to London Eye',
+    p1: '51.5080, -0.1281',
+    p2: '51.5033, -0.1195',
+    note: 'Trafalgar Square to London Eye (~136° SE)',
   },
   {
     name: 'London to Paris',
@@ -198,6 +198,13 @@ export default function BearingModal({
     }
   };
 
+  const KNOWN_W3W_OFFLINE: Record<string, string> = {
+    'filled.count.soap': '51.5080, -0.1281', // London Trafalgar Square
+    'daring.lion.race': '51.5033, -0.1195',  // London Eye
+    'index.home.raft': '51.5007, -0.1246',   // Big Ben / Westminster
+    'swallow.lamp.nest': '40.7484, -73.9857', // Empire State Building
+  };
+
   const resolveW3w = async (field: 1 | 2) => {
     const raw = field === 1 ? coord1Str : coord2Str;
     const setResolving = field === 1 ? setResolving1 : setResolving2;
@@ -210,16 +217,23 @@ export default function BearingModal({
     try {
       const cleaned = raw
         .trim()
+        .toLowerCase()
         .replace(/^[\/\s]+/, '')
         .split(/[\s.]+/)
         .filter(Boolean)
         .join('.');
 
+      // 1. Instant offline resolution for well-known sample addresses
+      if (KNOWN_W3W_OFFLINE[cleaned]) {
+        setCoord(KNOWN_W3W_OFFLINE[cleaned]);
+        return;
+      }
+
       const apiKey = w3wKey || process.env.NEXT_PUBLIC_WHAT3WORDS_API_KEY;
 
       if (!apiKey) {
         setShowKeyInput(true);
-        setError('what3words API key needed to convert words to coordinates.');
+        setError('what3words requires an API key for live lookup. Tip: Place Search, GPS, and Plus Codes work with zero key!');
         return;
       }
 
@@ -389,22 +403,25 @@ export default function BearingModal({
             className="text-[11px] text-slate-400 hover:text-sky-400 flex items-center gap-1 transition-colors"
           >
             <Key className="w-3 h-3" />
-            <span>{w3wKey ? 'w3w Key Configured' : 'what3words Key'}</span>
+            <span>{w3wKey ? 'w3w Key Configured' : 'Optional what3words Key'}</span>
           </button>
         </div>
 
         {/* Optional what3words API Key banner */}
         {showKeyInput && (
           <div className="mx-6 mt-3 p-3 bg-slate-950 border border-slate-800 rounded-xl flex flex-col gap-1.5 text-xs animate-in fade-in">
-            <label className="text-[11px] text-slate-300 font-medium">
-              what3words API Key (stored in your browser):
-            </label>
+            <div className="flex items-center justify-between">
+              <label className="text-[11px] text-slate-300 font-medium">
+                Optional what3words API Key (stored in your browser):
+              </label>
+              <span className="text-[10px] text-emerald-400">Zero keys needed for GPS, Search, Plus Codes & DD/DMS</span>
+            </div>
             <div className="flex gap-2">
               <input
                 type="password"
                 value={w3wKey}
                 onChange={(e) => handleSaveKey(e.target.value)}
-                placeholder="Paste what3words API key"
+                placeholder="Paste what3words API key (optional)"
                 className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
               />
               <button
