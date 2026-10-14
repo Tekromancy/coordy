@@ -1,13 +1,22 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { calculateGeographicBearing } from '@/lib/bearing';
+import {
+  calculateGeographicBearing,
+  calculateRhumbBearing,
+  interpolateGreatCircle,
+  formatDistance,
+  CalculationMode,
+} from '@/lib/bearing';
 import { MapViewState } from '@/lib/codec';
+import { Layers } from 'lucide-react';
 
 export interface MapVector {
   id: string;
+  label?: string;
+  color?: string;
   from: [number, number]; // [lat, lng]
   to: [number, number];
   bearing: number;
@@ -20,6 +29,39 @@ export interface AdjustingPoint {
   endpoint: 'from' | 'to';
 }
 
+export type BasemapId = 'osm' | 'dark' | 'topo' | 'satellite';
+
+export const BASEMAPS: { id: BasemapId; name: string; url: string; attribution: string; maxZoom: number }[] = [
+  {
+    id: 'osm',
+    name: 'OpenStreetMap',
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19,
+  },
+  {
+    id: 'dark',
+    name: 'Carto Dark',
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
+    maxZoom: 19,
+  },
+  {
+    id: 'topo',
+    name: 'OpenTopoMap',
+    url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; <a href="https://opentopomap.org">OpenTopoMap</a>',
+    maxZoom: 17,
+  },
+  {
+    id: 'satellite',
+    name: 'Satellite',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attribution: '&copy; Esri &mdash; Earthstar Geographics',
+    maxZoom: 18,
+  },
+];
+
 interface MapComponentProps {
   vectors: MapVector[];
   onAddVector: (vector: MapVector) => void;
@@ -31,9 +73,13 @@ interface MapComponentProps {
   onSelectVector: (vector: MapVector) => void;
   onViewStateChange?: (viewState: MapViewState) => void;
   initialViewState?: MapViewState;
+  mode?: CalculationMode;
+  currentBasemap?: BasemapId;
+  onBasemapChange?: (basemap: BasemapId) => void;
+  flyToTarget?: { center: [number, number]; zoom?: number; timestamp: number } | null;
 }
 
-function createEndpointIcon(type: 'from' | 'to', isAdjusting: boolean) {
+function createEndpointIcon(type: 'from' | 'to', isAdjusting: boolean, customColor?: string) {
   if (isAdjusting) {
     return L.divIcon({
       className: 'custom-endpoint-marker',
@@ -49,7 +95,7 @@ function createEndpointIcon(type: 'from' | 'to', isAdjusting: boolean) {
   }
 
   const isFrom = type === 'from';
-  const color = isFrom ? '#3b82f6' : '#ef4444';
+  const color = customColor || (isFrom ? '#3b82f6' : '#ef4444');
   const label = isFrom ? 'A' : 'B';
 
   return L.divIcon({
@@ -66,18 +112,30 @@ function createEndpointIcon(type: 'from' | 'to', isAdjusting: boolean) {
   });
 }
 
-function createBearingLabelIcon(bearing: number, cardinal: string) {
+function createBearingLabelIcon(bearing: number, cardinal: string, distanceKm?: number, isPreview = false) {
+  const distText = distanceKm !== undefined ? formatDistance(distanceKm * 1000) : '';
+  const bgClass = isPreview
+    ? 'bg-amber-950/95 border-amber-500/80 text-amber-200'
+    : 'bg-slate-900/90 border-blue-500/60 text-white';
+
   return L.divIcon({
     className: 'custom-bearing-label',
     html: `
-      <div class="cursor-pointer group flex items-center gap-1.5 px-2.5 py-1 bg-slate-900/90 text-white rounded-full shadow-lg border border-blue-500/60 backdrop-blur-sm text-xs font-semibold hover:scale-105 hover:border-blue-400 transition-transform">
-        <span style="display:inline-block; transform: rotate(${bearing}deg); color: #38bdf8; font-size: 14px;">➤</span>
-        <span class="font-mono text-white">${bearing.toFixed(1)}°</span>
-        <span class="text-sky-300 text-[10px] bg-blue-950/80 px-1 py-0.5 rounded border border-blue-700/50">${cardinal}</span>
+      <div class="cursor-pointer flex items-center gap-1.5 px-2.5 py-1 ${bgClass} rounded-full shadow-xl border backdrop-blur-sm text-xs font-semibold hover:scale-105 transition-transform select-none">
+        <span style="display:inline-block; transform: rotate(${bearing}deg); color: ${
+      isPreview ? '#fbbf24' : '#38bdf8'
+    }; font-size: 13px;">➤</span>
+        <span class="font-mono">${bearing.toFixed(1)}°</span>
+        <span class="text-[10px] px-1 py-0.5 rounded ${
+          isPreview
+            ? 'bg-amber-900/80 text-amber-300 border border-amber-600/40'
+            : 'bg-blue-950/80 text-sky-300 border border-blue-700/50'
+        }">${cardinal}</span>
+        ${distText ? `<span class="text-[10px] text-slate-300 font-normal pl-0.5 border-l border-slate-700/60">${distText}</span>` : ''}
       </div>
     `,
-    iconSize: [110, 30],
-    iconAnchor: [55, 15],
+    iconSize: [140, 30],
+    iconAnchor: [70, 15],
   });
 }
 
@@ -92,16 +150,21 @@ export default function MapComponent({
   onSelectVector,
   onViewStateChange,
   initialViewState,
+  mode = 'geographic',
+  currentBasemap = 'dark',
+  onBasemapChange,
+  flyToTarget,
 }: MapComponentProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
   const previewLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const pendingMarkerRef = useRef<L.CircleMarker | null>(null);
   const hasAppliedInitialViewRef = useRef(false);
   const isDraggingRef = useRef(false);
+  const [showBasemapMenu, setShowBasemapMenu] = useState(false);
 
-  // Keep references to latest props for Leaflet events
   const propsRef = useRef({
     vectors,
     pendingPoint,
@@ -112,6 +175,8 @@ export default function MapComponent({
     onSetAdjustingPoint,
     onSelectVector,
     onViewStateChange,
+    mode,
+    currentBasemap,
   });
 
   useEffect(() => {
@@ -125,6 +190,8 @@ export default function MapComponent({
       onSetAdjustingPoint,
       onSelectVector,
       onViewStateChange,
+      mode,
+      currentBasemap,
     };
   }, [
     vectors,
@@ -136,13 +203,14 @@ export default function MapComponent({
     onSetAdjustingPoint,
     onSelectVector,
     onViewStateChange,
+    mode,
+    currentBasemap,
   ]);
 
   // 1. Initialize Map
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
-    // Fix leaflet marker icon paths
     delete (L.Icon.Default.prototype as { _getIconUrl?: unknown })._getIconUrl;
     L.Icon.Default.mergeOptions({
       iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
@@ -159,19 +227,19 @@ export default function MapComponent({
       zoomControl: false,
     });
 
-    // Add zoom control to top-right
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // Standard OpenStreetMap tiles
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    // Initial tile layer
+    const baseDef = BASEMAPS.find((b) => b.id === currentBasemap) || BASEMAPS[1];
+    const tileLayer = L.tileLayer(baseDef.url, {
+      maxZoom: baseDef.maxZoom,
+      attribution: baseDef.attribution,
     }).addTo(map);
+    tileLayerRef.current = tileLayer;
 
     layerGroupRef.current = L.layerGroup().addTo(map);
     previewLayerGroupRef.current = L.layerGroup().addTo(map);
 
-    // Track zoom and pan movements to report view state changes
     const emitViewState = () => {
       const c = map.getCenter();
       const z = map.getZoom();
@@ -185,7 +253,7 @@ export default function MapComponent({
     map.on('zoomend', emitViewState);
     emitViewState();
 
-    // Handle Map Clicks
+    // Map Click
     map.on('click', (e: L.LeafletMouseEvent) => {
       if (isDraggingRef.current) return;
 
@@ -198,9 +266,10 @@ export default function MapComponent({
         onSetAdjustingPoint,
         onUpdateVector,
         vectors,
+        mode,
       } = propsRef.current;
 
-      // If an endpoint is currently selected for adjustment, update it to the clicked location
+      // Adjusting existing vector endpoint
       if (adjustingPoint) {
         const vec = vectors.find((v) => v.id === adjustingPoint.vectorId);
         if (vec) {
@@ -211,7 +280,11 @@ export default function MapComponent({
           const p2 = isFrom
             ? { lat: vec.to[0], lon: vec.to[1] }
             : { lat: latLng[0], lon: latLng[1] };
-          const calc = calculateGeographicBearing(p1, p2);
+
+          const calc =
+            mode === 'rhumb'
+              ? calculateRhumbBearing(p1, p2)
+              : calculateGeographicBearing(p1, p2);
 
           const updatedVector: MapVector = {
             ...vec,
@@ -224,17 +297,19 @@ export default function MapComponent({
           onUpdateVector(updatedVector);
         }
         onSetAdjustingPoint(null);
+        if (previewLayerGroupRef.current) previewLayerGroupRef.current.clearLayers();
         return;
       }
 
       if (!pendingPoint) {
-        // First click: start of vector
         onSetPendingPoint(latLng);
       } else {
-        // Second click: end of vector
         const p1 = { lat: pendingPoint[0], lon: pendingPoint[1] };
         const p2 = { lat: latLng[0], lon: latLng[1] };
-        const calc = calculateGeographicBearing(p1, p2);
+        const calc =
+          mode === 'rhumb'
+            ? calculateRhumbBearing(p1, p2)
+            : calculateGeographicBearing(p1, p2);
 
         const newVector: MapVector = {
           id: 'vec_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
@@ -247,55 +322,116 @@ export default function MapComponent({
 
         onAddVector(newVector);
         onSetPendingPoint(null);
+        if (previewLayerGroupRef.current) previewLayerGroupRef.current.clearLayers();
       }
     });
 
-    // Handle Live Mouse Movement during adjustment preview
+    // Mouse Move for Live Rubber-band preview
     map.on('mousemove', (e: L.LeafletMouseEvent) => {
-      const { adjustingPoint, vectors } = propsRef.current;
+      const { adjustingPoint, pendingPoint, vectors, mode } = propsRef.current;
       const previewLayer = previewLayerGroupRef.current;
-      if (!adjustingPoint || !previewLayer) return;
-
-      const vec = vectors.find((v) => v.id === adjustingPoint.vectorId);
-      if (!vec) return;
-
-      previewLayer.clearLayers();
+      if (!previewLayer) return;
 
       const mouseCoord: [number, number] = [e.latlng.lat, e.latlng.lng];
-      const isFrom = adjustingPoint.endpoint === 'from';
-      const fixedCoord = isFrom ? vec.to : vec.from;
-      const p1 = isFrom
-        ? { lat: mouseCoord[0], lon: mouseCoord[1] }
-        : { lat: fixedCoord[0], lon: fixedCoord[1] };
-      const p2 = isFrom
-        ? { lat: fixedCoord[0], lon: fixedCoord[1] }
-        : { lat: mouseCoord[0], lon: mouseCoord[1] };
-      const calc = calculateGeographicBearing(p1, p2);
 
-      const previewLine = L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
-        color: '#f59e0b',
-        weight: 3,
-        dashArray: '6, 8',
-        opacity: 0.9,
-      });
+      // Case A: Adjusting existing point
+      if (adjustingPoint) {
+        const vec = vectors.find((v) => v.id === adjustingPoint.vectorId);
+        if (!vec) return;
+        previewLayer.clearLayers();
 
-      const midLat = (p1.lat + p2.lat) / 2;
-      const midLng = (p1.lon + p2.lon) / 2;
-      const previewBadge = L.marker([midLat, midLng], {
-        icon: createBearingLabelIcon(calc.bearing, calc.cardinal),
-      });
+        const isFrom = adjustingPoint.endpoint === 'from';
+        const fixedCoord = isFrom ? vec.to : vec.from;
+        const p1 = isFrom
+          ? { lat: mouseCoord[0], lon: mouseCoord[1] }
+          : { lat: fixedCoord[0], lon: fixedCoord[1] };
+        const p2 = isFrom
+          ? { lat: fixedCoord[0], lon: fixedCoord[1] }
+          : { lat: mouseCoord[0], lon: mouseCoord[1] };
 
-      previewLayer.addLayer(previewLine);
-      previewLayer.addLayer(previewBadge);
+        const calc =
+          mode === 'rhumb'
+            ? calculateRhumbBearing(p1, p2)
+            : calculateGeographicBearing(p1, p2);
+
+        const polylineCoords: L.LatLngTuple[] =
+          mode === 'rhumb'
+            ? [
+                [p1.lat, p1.lon],
+                [p2.lat, p2.lon],
+              ]
+            : (interpolateGreatCircle([p1.lat, p1.lon], [p2.lat, p2.lon], 24) as L.LatLngTuple[]);
+
+        const previewLine = L.polyline(polylineCoords, {
+          color: '#f59e0b',
+          weight: 3,
+          dashArray: '6, 8',
+          opacity: 0.9,
+        });
+
+        const midIndex = Math.floor(polylineCoords.length / 2);
+        const midPoint: L.LatLngTuple = polylineCoords[midIndex];
+        const previewBadge = L.marker(midPoint, {
+          icon: createBearingLabelIcon(calc.bearing, calc.cardinal, calc.distanceKm, true),
+        });
+
+        previewLayer.addLayer(previewLine);
+        previewLayer.addLayer(previewBadge);
+        return;
+      }
+
+      // Case B: Pending Point A active (rubber-band to mouse for Point B)
+      if (pendingPoint) {
+        previewLayer.clearLayers();
+
+        const p1 = { lat: pendingPoint[0], lon: pendingPoint[1] };
+        const p2 = { lat: mouseCoord[0], lon: mouseCoord[1] };
+
+        const calc =
+          mode === 'rhumb'
+            ? calculateRhumbBearing(p1, p2)
+            : calculateGeographicBearing(p1, p2);
+
+        const polylineCoords: L.LatLngTuple[] =
+          mode === 'rhumb'
+            ? [
+                [p1.lat, p1.lon],
+                [p2.lat, p2.lon],
+              ]
+            : (interpolateGreatCircle([p1.lat, p1.lon], [p2.lat, p2.lon], 24) as L.LatLngTuple[]);
+
+        const previewLine = L.polyline(polylineCoords, {
+          color: '#38bdf8',
+          weight: 2.5,
+          dashArray: '5, 7',
+          opacity: 0.85,
+        });
+
+        const midIndex = Math.floor(polylineCoords.length / 2);
+        const midPoint: L.LatLngTuple = polylineCoords[midIndex];
+        const previewBadge = L.marker(midPoint, {
+          icon: createBearingLabelIcon(calc.bearing, calc.cardinal, calc.distanceKm, false),
+        });
+
+        previewLayer.addLayer(previewLine);
+        previewLayer.addLayer(previewBadge);
+        return;
+      }
+
+      if (previewLayer.getLayers().length > 0) {
+        previewLayer.clearLayers();
+      }
     });
 
-    // Handle Escape key to cancel adjustment or pending point
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (propsRef.current.adjustingPoint) {
           propsRef.current.onSetAdjustingPoint(null);
         } else if (propsRef.current.pendingPoint) {
           propsRef.current.onSetPendingPoint(null);
+        }
+        if (previewLayerGroupRef.current) {
+          previewLayerGroupRef.current.clearLayers();
         }
       }
     };
@@ -310,7 +446,27 @@ export default function MapComponent({
     };
   }, []);
 
-  // Update map view when initialViewState arrives after mount
+  // Update basemap tiles when changed
+  useEffect(() => {
+    if (!mapInstanceRef.current) return;
+    const baseDef = BASEMAPS.find((b) => b.id === currentBasemap) || BASEMAPS[1];
+
+    if (tileLayerRef.current) {
+      tileLayerRef.current.setUrl(baseDef.url);
+      tileLayerRef.current.options.maxZoom = baseDef.maxZoom;
+    }
+  }, [currentBasemap]);
+
+  // FlyTo programmatic triggers
+  useEffect(() => {
+    if (flyToTarget && mapInstanceRef.current) {
+      mapInstanceRef.current.flyTo(flyToTarget.center, flyToTarget.zoom || 12, {
+        duration: 1.2,
+      });
+    }
+  }, [flyToTarget]);
+
+  // Initial view state on mount
   useEffect(() => {
     if (initialViewState && mapInstanceRef.current && !hasAppliedInitialViewRef.current) {
       mapInstanceRef.current.setView(initialViewState.center, initialViewState.zoom);
@@ -318,22 +474,22 @@ export default function MapComponent({
     }
   }, [initialViewState]);
 
-  // Adjust cursor style when in adjustment mode
+  // Cursor style & clear preview on cancel
   useEffect(() => {
     if (!mapInstanceRef.current) return;
     const container = mapInstanceRef.current.getContainer();
-    if (adjustingPoint) {
+    if (adjustingPoint || pendingPoint) {
       container.style.cursor = 'crosshair';
     } else {
       container.style.cursor = '';
     }
 
-    if (!adjustingPoint && previewLayerGroupRef.current) {
+    if (!adjustingPoint && !pendingPoint && previewLayerGroupRef.current) {
       previewLayerGroupRef.current.clearLayers();
     }
-  }, [adjustingPoint]);
+  }, [adjustingPoint, pendingPoint]);
 
-  // 2. Render Pending Point Marker
+  // Pending Marker rendering
   useEffect(() => {
     if (!mapInstanceRef.current) return;
     const map = mapInstanceRef.current;
@@ -352,7 +508,7 @@ export default function MapComponent({
         weight: 2,
       }).addTo(map);
 
-      marker.bindTooltip('Point A (Click destination)', {
+      marker.bindTooltip('Point A (Move mouse to preview, click to set Point B)', {
         permanent: true,
         direction: 'top',
         className: 'pending-marker-tooltip',
@@ -362,7 +518,7 @@ export default function MapComponent({
     }
   }, [pendingPoint]);
 
-  // 3. Render Completed Vectors with Clickable & Draggable Endpoints
+  // Render Completed Vectors with Geodesic Curves & Endpoints
   useEffect(() => {
     if (!layerGroupRef.current || !mapInstanceRef.current) return;
     const layerGroup = layerGroupRef.current;
@@ -382,92 +538,107 @@ export default function MapComponent({
       const isAdjustingTo =
         adjustingPoint?.vectorId === vec.id && adjustingPoint?.endpoint === 'to';
 
-      // Start Marker (Point A - Blue)
       const startMarker = L.marker(vec.from, {
-        icon: createEndpointIcon('from', isAdjustingFrom),
+        icon: createEndpointIcon('from', isAdjustingFrom, vec.color),
         draggable: true,
       });
 
-      // End Marker (Point B - Red)
       const endMarker = L.marker(vec.to, {
-        icon: createEndpointIcon('to', isAdjustingTo),
+        icon: createEndpointIcon('to', isAdjustingTo, vec.color),
         draggable: true,
       });
 
-      // Main line connecting A -> B
-      const polyline = L.polyline([vec.from, vec.to], {
-        color: isAdjustingFrom || isAdjustingTo ? '#60a5fa' : '#2563eb',
+      // Geodesic curve interpolation vs direct line
+      const polylinePoints: L.LatLngTuple[] =
+        mode === 'rhumb'
+          ? [vec.from, vec.to]
+          : (interpolateGreatCircle(vec.from, vec.to, 32) as L.LatLngTuple[]);
+
+      const lineColor = vec.color || (isAdjustingFrom || isAdjustingTo ? '#60a5fa' : '#2563eb');
+      const polyline = L.polyline(polylinePoints, {
+        color: lineColor,
         weight: 4,
         opacity: isAdjustingFrom || isAdjustingTo ? 0.4 : 0.85,
         lineCap: 'round',
       });
 
-      // Midpoint label displaying bearing
-      const midLat = (vec.from[0] + vec.to[0]) / 2;
-      const midLng = (vec.from[1] + vec.to[1]) / 2;
-      const labelMarker = L.marker([midLat, midLng], {
-        icon: createBearingLabelIcon(vec.bearing, vec.cardinal),
+      // Midpoint along the curve
+      const midIdx = Math.floor(polylinePoints.length / 2);
+      const midPoint: L.LatLngTuple = polylinePoints[midIdx];
+      const labelMarker = L.marker(midPoint, {
+        icon: createBearingLabelIcon(vec.bearing, vec.cardinal, vec.distanceKm),
       });
 
-      // Tooltips for endpoints explaining adjustment options
-      if (isAdjustingFrom) {
-        startMarker.bindTooltip('Point A active • Click map or drag to place', {
-          permanent: true,
+      startMarker.bindTooltip(
+        isAdjustingFrom
+          ? 'Point A active • Click map or drag to place'
+          : 'Point A (Click or drag to adjust)',
+        {
           direction: 'top',
-          className: 'custom-endpoint-tooltip',
-          offset: [0, -18],
-        });
-      } else {
-        startMarker.bindTooltip('Point A (Click or drag to adjust)', {
-          direction: 'top',
+          permanent: isAdjustingFrom,
           className: 'custom-endpoint-tooltip',
           offset: [0, -14],
-        });
-      }
+        }
+      );
 
-      if (isAdjustingTo) {
-        endMarker.bindTooltip('Point B active • Click map or drag to place', {
-          permanent: true,
+      endMarker.bindTooltip(
+        isAdjustingTo
+          ? 'Point B active • Click map or drag to place'
+          : 'Point B (Click or drag to adjust)',
+        {
           direction: 'top',
-          className: 'custom-endpoint-tooltip',
-          offset: [0, -18],
-        });
-      } else {
-        endMarker.bindTooltip('Point B (Click or drag to adjust)', {
-          direction: 'top',
+          permanent: isAdjustingTo,
           className: 'custom-endpoint-tooltip',
           offset: [0, -14],
-        });
-      }
+        }
+      );
 
-      // Dragging handlers for Start Marker (Point A)
+      // Start drag handlers
       startMarker.on('dragstart', () => {
         isDraggingRef.current = true;
       });
 
       startMarker.on('drag', (e: L.LeafletEvent) => {
         const marker = e.target as L.Marker;
-        const newPos = marker.getLatLng();
-        const newCoord: [number, number] = [newPos.lat, newPos.lng];
-        polyline.setLatLngs([newCoord, vec.to]);
-        const calc = calculateGeographicBearing(
-          { lat: newCoord[0], lon: newCoord[1] },
-          { lat: vec.to[0], lon: vec.to[1] }
-        );
-        const mLat = (newCoord[0] + vec.to[0]) / 2;
-        const mLng = (newCoord[1] + vec.to[1]) / 2;
-        labelMarker.setLatLng([mLat, mLng]);
-        labelMarker.setIcon(createBearingLabelIcon(calc.bearing, calc.cardinal));
+        const pos = marker.getLatLng();
+        const newCoord: [number, number] = [pos.lat, pos.lng];
+        const newPts: L.LatLngTuple[] =
+          mode === 'rhumb'
+            ? [newCoord, vec.to]
+            : (interpolateGreatCircle(newCoord, vec.to, 24) as L.LatLngTuple[]);
+        polyline.setLatLngs(newPts);
+
+        const calc =
+          mode === 'rhumb'
+            ? calculateRhumbBearing(
+                { lat: newCoord[0], lon: newCoord[1] },
+                { lat: vec.to[0], lon: vec.to[1] }
+              )
+            : calculateGeographicBearing(
+                { lat: newCoord[0], lon: newCoord[1] },
+                { lat: vec.to[0], lon: vec.to[1] }
+              );
+
+        const mIdx = Math.floor(newPts.length / 2);
+        labelMarker.setLatLng(newPts[mIdx]);
+        labelMarker.setIcon(createBearingLabelIcon(calc.bearing, calc.cardinal, calc.distanceKm));
       });
 
       startMarker.on('dragend', (e: L.LeafletEvent) => {
         const marker = e.target as L.Marker;
-        const newPos = marker.getLatLng();
-        const newCoord: [number, number] = [newPos.lat, newPos.lng];
-        const calc = calculateGeographicBearing(
-          { lat: newCoord[0], lon: newCoord[1] },
-          { lat: vec.to[0], lon: vec.to[1] }
-        );
+        const pos = marker.getLatLng();
+        const newCoord: [number, number] = [pos.lat, pos.lng];
+        const calc =
+          mode === 'rhumb'
+            ? calculateRhumbBearing(
+                { lat: newCoord[0], lon: newCoord[1] },
+                { lat: vec.to[0], lon: vec.to[1] }
+              )
+            : calculateGeographicBearing(
+                { lat: newCoord[0], lon: newCoord[1] },
+                { lat: vec.to[0], lon: vec.to[1] }
+              );
+
         const updatedVector: MapVector = {
           ...vec,
           from: newCoord,
@@ -481,7 +652,6 @@ export default function MapComponent({
         }, 80);
       });
 
-      // Click on Start Marker toggles adjustment mode
       startMarker.on('click', (e: L.LeafletMouseEvent) => {
         L.DomEvent.stopPropagation(e);
         if (isDraggingRef.current) return;
@@ -493,34 +663,52 @@ export default function MapComponent({
         }
       });
 
-      // Dragging handlers for End Marker (Point B)
+      // End drag handlers
       endMarker.on('dragstart', () => {
         isDraggingRef.current = true;
       });
 
       endMarker.on('drag', (e: L.LeafletEvent) => {
         const marker = e.target as L.Marker;
-        const newPos = marker.getLatLng();
-        const newCoord: [number, number] = [newPos.lat, newPos.lng];
-        polyline.setLatLngs([vec.from, newCoord]);
-        const calc = calculateGeographicBearing(
-          { lat: vec.from[0], lon: vec.from[1] },
-          { lat: newCoord[0], lon: newCoord[1] }
-        );
-        const mLat = (vec.from[0] + newCoord[0]) / 2;
-        const mLng = (vec.from[1] + newCoord[1]) / 2;
-        labelMarker.setLatLng([mLat, mLng]);
-        labelMarker.setIcon(createBearingLabelIcon(calc.bearing, calc.cardinal));
+        const pos = marker.getLatLng();
+        const newCoord: [number, number] = [pos.lat, pos.lng];
+        const newPts: L.LatLngTuple[] =
+          mode === 'rhumb'
+            ? [vec.from, newCoord]
+            : (interpolateGreatCircle(vec.from, newCoord, 24) as L.LatLngTuple[]);
+        polyline.setLatLngs(newPts);
+
+        const calc =
+          mode === 'rhumb'
+            ? calculateRhumbBearing(
+                { lat: vec.from[0], lon: vec.from[1] },
+                { lat: newCoord[0], lon: newCoord[1] }
+              )
+            : calculateGeographicBearing(
+                { lat: vec.from[0], lon: vec.from[1] },
+                { lat: newCoord[0], lon: newCoord[1] }
+              );
+
+        const mIdx = Math.floor(newPts.length / 2);
+        labelMarker.setLatLng(newPts[mIdx]);
+        labelMarker.setIcon(createBearingLabelIcon(calc.bearing, calc.cardinal, calc.distanceKm));
       });
 
       endMarker.on('dragend', (e: L.LeafletEvent) => {
         const marker = e.target as L.Marker;
-        const newPos = marker.getLatLng();
-        const newCoord: [number, number] = [newPos.lat, newPos.lng];
-        const calc = calculateGeographicBearing(
-          { lat: vec.from[0], lon: vec.from[1] },
-          { lat: newCoord[0], lon: newCoord[1] }
-        );
+        const pos = marker.getLatLng();
+        const newCoord: [number, number] = [pos.lat, pos.lng];
+        const calc =
+          mode === 'rhumb'
+            ? calculateRhumbBearing(
+                { lat: vec.from[0], lon: vec.from[1] },
+                { lat: newCoord[0], lon: newCoord[1] }
+              )
+            : calculateGeographicBearing(
+                { lat: vec.from[0], lon: vec.from[1] },
+                { lat: newCoord[0], lon: newCoord[1] }
+              );
+
         const updatedVector: MapVector = {
           ...vec,
           to: newCoord,
@@ -534,7 +722,6 @@ export default function MapComponent({
         }, 80);
       });
 
-      // Click on End Marker toggles adjustment mode
       endMarker.on('click', (e: L.LeafletMouseEvent) => {
         L.DomEvent.stopPropagation(e);
         if (isDraggingRef.current) return;
@@ -546,7 +733,6 @@ export default function MapComponent({
         }
       });
 
-      // Click on line or bearing label opens bearing details modal
       const handleSelect = (e: L.LeafletMouseEvent) => {
         L.DomEvent.stopPropagation(e);
         propsRef.current.onSelectVector(vec);
@@ -561,12 +747,53 @@ export default function MapComponent({
       layerGroup.addLayer(labelMarker);
     });
 
-    // If no explicit initialViewState was supplied with zoom/center, auto-fit once
     if (!initialViewState && !hasAppliedInitialViewRef.current && bounds.isValid()) {
       map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
       hasAppliedInitialViewRef.current = true;
     }
-  }, [vectors, adjustingPoint, initialViewState]);
+  }, [vectors, adjustingPoint, initialViewState, mode]);
 
-  return <div ref={mapContainerRef} className="w-full h-full relative z-0" />;
+  return (
+    <div className="w-full h-full relative z-0">
+      <div ref={mapContainerRef} className="w-full h-full relative z-0" />
+
+      {/* Basemap Switcher floating button (top right, below Leaflet zoom controls) */}
+      <div className="absolute top-20 right-3 z-[1000] pointer-events-auto">
+        <div className="relative">
+          <button
+            onClick={() => setShowBasemapMenu(!showBasemapMenu)}
+            className="p-2 bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white border border-slate-700/80 rounded-xl shadow-xl backdrop-blur-md transition-all cursor-pointer"
+            title="Switch Base Map Layers"
+          >
+            <Layers className="w-4 h-4 text-sky-400" />
+          </button>
+
+          {showBasemapMenu && (
+            <div className="absolute right-0 top-full mt-2 w-44 bg-slate-900/95 border border-slate-700/80 rounded-xl shadow-2xl backdrop-blur-md p-1.5 z-50 flex flex-col gap-1 text-xs">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 px-2 py-1">
+                Base Maps
+              </span>
+              {BASEMAPS.map((b) => (
+                <button
+                  key={b.id}
+                  onClick={() => {
+                    onBasemapChange?.(b.id);
+                    setShowBasemapMenu(false);
+                  }}
+                  className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
+                    currentBasemap === b.id
+                      ? 'bg-blue-600 text-white font-medium shadow'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <span>{b.name}</span>
+                  {currentBasemap === b.id && <span className="text-[10px]">●</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }

@@ -1,5 +1,5 @@
 import { MapVector } from '@/components/MapComponent';
-import { calculateGeographicBearing } from '@/lib/bearing';
+import { calculateGeographicBearing, CalculationMode } from '@/lib/bearing';
 
 export interface MapViewState {
   center: [number, number]; // [lat, lng]
@@ -12,9 +12,17 @@ export interface SharedMapPayload {
   v: CompactVector[];
   z?: number;
   c?: [number, number]; // [lat, lng]
+  m?: CalculationMode;
+  b?: string; // basemap ID
+  l?: string[]; // vector labels
 }
 
-export function encodeMapStateToHash(vectors: MapVector[], viewState?: MapViewState): string {
+export function encodeMapStateToHash(
+  vectors: MapVector[],
+  viewState?: MapViewState,
+  mode?: CalculationMode,
+  basemap?: string
+): string {
   const compact: CompactVector[] = vectors.map((v) => [
     Number(v.from[0].toFixed(5)),
     Number(v.from[1].toFixed(5)),
@@ -23,12 +31,26 @@ export function encodeMapStateToHash(vectors: MapVector[], viewState?: MapViewSt
   ]);
 
   const payload: SharedMapPayload = { v: compact };
+
   if (viewState) {
     payload.z = Math.round(viewState.zoom * 10) / 10;
     payload.c = [
       Number(viewState.center[0].toFixed(5)),
       Number(viewState.center[1].toFixed(5)),
     ];
+  }
+
+  if (mode && mode !== 'geographic') {
+    payload.m = mode;
+  }
+
+  if (basemap && basemap !== 'osm') {
+    payload.b = basemap;
+  }
+
+  const hasLabels = vectors.some((v) => Boolean(v.label));
+  if (hasLabels) {
+    payload.l = vectors.map((v) => v.label || '');
   }
 
   try {
@@ -44,7 +66,12 @@ export function encodeMapStateToHash(vectors: MapVector[], viewState?: MapViewSt
   }
 }
 
-export function decodeMapStateFromHash(hash: string): { vectors: MapVector[]; viewState?: MapViewState } {
+export function decodeMapStateFromHash(hash: string): {
+  vectors: MapVector[];
+  viewState?: MapViewState;
+  mode?: CalculationMode;
+  basemap?: string;
+} {
   if (!hash) return { vectors: [] };
   try {
     let base64 = hash.replace(/-/g, '+').replace(/_/g, '/');
@@ -52,13 +79,19 @@ export function decodeMapStateFromHash(hash: string): { vectors: MapVector[]; vi
       base64 += '=';
     }
 
-    const jsonStr = typeof window !== 'undefined' ? atob(base64) : Buffer.from(base64, 'base64').toString('utf-8');
+    const jsonStr =
+      typeof window !== 'undefined'
+        ? atob(base64)
+        : Buffer.from(base64, 'base64').toString('utf-8');
     const parsed = JSON.parse(jsonStr);
 
     let rawVectors: CompactVector[] = [];
     let viewState: MapViewState | undefined;
+    let mode: CalculationMode | undefined;
+    let basemap: string | undefined;
+    let labels: string[] | undefined;
 
-    // Backwards-compatible: either raw array of vectors or object with { v, z, c }
+    // Backwards-compatible: either raw array of vectors or object with { v, z, c, m, b, l }
     if (Array.isArray(parsed)) {
       rawVectors = parsed;
     } else if (parsed && typeof parsed === 'object') {
@@ -70,6 +103,15 @@ export function decodeMapStateFromHash(hash: string): { vectors: MapVector[]; vi
           zoom: parsed.z,
           center: [parsed.c[0], parsed.c[1]],
         };
+      }
+      if (parsed.m === 'geographic' || parsed.m === 'rhumb' || parsed.m === 'planar') {
+        mode = parsed.m;
+      }
+      if (typeof parsed.b === 'string') {
+        basemap = parsed.b;
+      }
+      if (Array.isArray(parsed.l)) {
+        labels = parsed.l;
       }
     }
 
@@ -83,6 +125,7 @@ export function decodeMapStateFromHash(hash: string): { vectors: MapVector[]; vi
 
       return {
         id: `shared_${idx}_${Date.now()}`,
+        label: labels && labels[idx] ? labels[idx] : undefined,
         from,
         to,
         bearing: calc.bearing,
@@ -91,7 +134,7 @@ export function decodeMapStateFromHash(hash: string): { vectors: MapVector[]; vi
       };
     });
 
-    return { vectors, viewState };
+    return { vectors, viewState, mode, basemap };
   } catch (e) {
     console.error('Failed to decode map state from hash:', e);
     return { vectors: [] };
