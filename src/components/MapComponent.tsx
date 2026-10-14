@@ -33,24 +33,24 @@ export type BasemapId = 'osm' | 'dark' | 'topo' | 'satellite';
 
 export const BASEMAPS: { id: BasemapId; name: string; url: string; attribution: string; maxZoom: number }[] = [
   {
-    id: 'osm',
-    name: 'OpenStreetMap',
+    id: 'dark',
+    name: 'Tactical Dark',
     url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
     maxZoom: 19,
   },
   {
-    id: 'dark',
-    name: 'Carto Dark',
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
+    id: 'osm',
+    name: 'OpenStreetMap',
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
     maxZoom: 19,
   },
   {
     id: 'topo',
     name: 'OpenTopoMap',
     url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
-    attribution: '&copy; <a href="https://opentopomap.org">OpenTopoMap</a>',
+    attribution: '&copy; <a href="https://opentopomap.org" target="_blank" rel="noopener">OpenTopoMap</a>',
     maxZoom: 17,
   },
   {
@@ -230,12 +230,16 @@ export default function MapComponent({
     L.control.zoom({ position: 'topright' }).addTo(map);
 
     // Initial tile layer
-    const baseDef = BASEMAPS.find((b) => b.id === currentBasemap) || BASEMAPS[1];
+    const baseDef = BASEMAPS.find((b) => b.id === currentBasemap) || BASEMAPS[0];
     const tileLayer = L.tileLayer(baseDef.url, {
       maxZoom: baseDef.maxZoom,
       attribution: baseDef.attribution,
     }).addTo(map);
     tileLayerRef.current = tileLayer;
+
+    if (currentBasemap === 'dark' && mapContainerRef.current) {
+      mapContainerRef.current.classList.add('dark-basemap');
+    }
 
     layerGroupRef.current = L.layerGroup().addTo(map);
     previewLayerGroupRef.current = L.layerGroup().addTo(map);
@@ -449,11 +453,15 @@ export default function MapComponent({
   // Update basemap tiles when changed
   useEffect(() => {
     if (!mapInstanceRef.current) return;
-    const baseDef = BASEMAPS.find((b) => b.id === currentBasemap) || BASEMAPS[1];
+    const baseDef = BASEMAPS.find((b) => b.id === currentBasemap) || BASEMAPS[0];
 
     if (tileLayerRef.current) {
       tileLayerRef.current.setUrl(baseDef.url);
       tileLayerRef.current.options.maxZoom = baseDef.maxZoom;
+    }
+
+    if (mapContainerRef.current) {
+      mapContainerRef.current.classList.toggle('dark-basemap', currentBasemap === 'dark');
     }
   }, [currentBasemap]);
 
